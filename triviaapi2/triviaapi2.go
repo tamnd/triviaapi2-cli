@@ -96,15 +96,15 @@ type CategoryInfo struct {
 
 // wireQuestion is the JSON shape returned by /v2/questions.
 type wireQuestion struct {
-	ID       string    `json:"id"`
-	Type     string    `json:"type"`
-	Difficulty string  `json:"difficulty"`
-	Category string    `json:"category"`
-	Tags     []string  `json:"tags"`
-	Question wireQText `json:"question"`
-	CorrectAnswer    string   `json:"correctAnswer"`
-	IncorrectAnswers []string `json:"incorrectAnswers"`
-	IsNiche bool      `json:"isNiche"`
+	ID               string    `json:"id"`
+	Type             string    `json:"type"`
+	Difficulty       string    `json:"difficulty"`
+	Category         string    `json:"category"`
+	Tags             []string  `json:"tags"`
+	Question         wireQText `json:"question"`
+	CorrectAnswer    string    `json:"correctAnswer"`
+	IncorrectAnswers []string  `json:"incorrectAnswers"`
+	IsNiche          bool      `json:"isNiche"`
 }
 
 type wireQText struct {
