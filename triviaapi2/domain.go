@@ -2,74 +2,67 @@ package triviaapi2
 
 import (
 	"context"
-	"net/url"
 	"strings"
 
 	"github.com/tamnd/any-cli/kit"
 	"github.com/tamnd/any-cli/kit/errs"
 )
 
-// domain.go exposes triviaapi2 as a kit Domain: a driver that a multi-domain
-// host (ant) enables with a single blank import,
+// domain.go exposes The Trivia API v2 as a kit Domain: a driver that a
+// multi-domain host (ant) enables with a single blank import,
 //
 //	import _ "github.com/tamnd/triviaapi2-cli/triviaapi2"
 //
 // exactly as a database/sql program enables a driver with `import _
-// "github.com/lib/pq"`. The init below registers it; the host then dereferences
-// triviaapi2:// URIs by routing to the operations Register installs. The same
-// Domain also builds the standalone triviaapi2 binary (see cli.NewApp), so the
-// binary and a host share one source of truth.
-//
-// This is the scaffold's starting point: one resource type, "page", served by a
-// resolver op and a list op. Add your real types here as you model the site.
+// "github.com/lib/pq"`. The init below registers it; the host then
+// dereferences triviaapi2:// URIs by routing to the operations Register
+// installs. The same Domain also builds the standalone triviaapi2 binary
+// (see cli.NewApp), so the binary and a host share one source of truth.
 func init() { kit.Register(Domain{}) }
 
 // Domain is the triviaapi2 driver. It carries no state; the per-run client is
 // built by the factory Register hands kit.
 type Domain struct{}
 
-// Info describes the scheme, the hostnames a pasted link is matched against, and
-// the identity reused for the binary's help and version.
+// Info describes the scheme, the hostnames a pasted link is matched against,
+// and the identity reused for the binary's help and version.
 func (Domain) Info() kit.DomainInfo {
 	return kit.DomainInfo{
 		Scheme: "triviaapi2",
 		Hosts:  []string{Host},
 		Identity: kit.Identity{
 			Binary: "triviaapi2",
-			Short:  "A command line for triviaapi2.",
-			Long: `A command line for triviaapi2.
-
-triviaapi2 reads public triviaapi2 data over plain HTTPS, shapes it into
-clean records, and prints output that pipes into the rest of your tools. No API
-key, nothing to run alongside it.`,
+			Short:  "Fetch trivia questions and categories from The Trivia API v2",
+			Long: `triviaapi2 reads public trivia data from the-trivia-api.com/v2 over HTTPS,
+shapes it into clean records, and prints output that pipes into the rest
+of your tools. No API key needed.`,
 			Site: Host,
 			Repo: "https://github.com/tamnd/triviaapi2-cli",
 		},
 	}
 }
 
-// Register installs the client factory and every operation onto app. A resolver
-// op (Single) names its own record type and answers `ant get`; a List op
-// enumerates a parent resource's members and answers `ant ls`.
+// Register installs the client factory and every operation onto app.
 func (Domain) Register(app *kit.App) {
 	app.SetClient(newClient)
 
-	// Resolver op: one record per id, the home of `triviaapi2 page` and
-	// `ant get triviaapi2://page/<id>`.
-	kit.Handle(app, kit.OpMeta{Name: "page", Group: "read", Single: true,
-		Summary: "Fetch a page by path or URL", URIType: "page", Resolver: true,
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, getPage)
+	kit.Handle(app, kit.OpMeta{
+		Name: "questions", Group: "read", List: true,
+		Summary: "Get trivia questions (--category, --difficulty, --limit)",
+	}, listQuestions)
 
-	// List op: members of a page, the home of `triviaapi2 links` and `ant ls`.
-	// It emits page stubs, so every listed member is itself an addressable
-	// triviaapi2://page/ URI a host can follow.
-	kit.Handle(app, kit.OpMeta{Name: "links", Group: "read", List: true,
-		Summary: "List the pages a page links to", URIType: "page",
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, listLinks)
+	kit.Handle(app, kit.OpMeta{
+		Name: "categories", Group: "read", List: true,
+		Summary: "List all trivia categories",
+	}, listCategories)
+
+	kit.Handle(app, kit.OpMeta{
+		Name: "random", Group: "read", Single: true,
+		Summary: "Get a single random trivia question",
+	}, randomQuestion)
 }
 
-// newClient builds the client from the host-resolved config, so a host and the
-// standalone binary pace and identify themselves the same way.
+// newClient builds the client from the host-resolved config.
 func newClient(_ context.Context, cfg kit.Config) (any, error) {
 	c := NewClient()
 	if cfg.UserAgent != "" {
@@ -88,86 +81,80 @@ func newClient(_ context.Context, cfg kit.Config) (any, error) {
 }
 
 // --- inputs ---
-//
-// Each handler takes a typed input struct. kit fills the fields from the tags:
-// kit:"arg" is a positional argument, kit:"flag,inherit" binds the framework's
-// shared flag of the same name, and kit:"inject" receives the client newClient
-// builds.
 
-type pageRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
+type questionsInput struct {
+	Category   string  `kit:"flag" help:"category name (Science, Geography, etc)"`
+	Difficulty string  `kit:"flag" help:"difficulty (easy, medium, hard)"`
+	Limit      int     `kit:"flag,inherit" help:"max questions (max 50)"`
+	Client     *Client `kit:"inject"`
+}
+
+type categoriesInput struct {
 	Client *Client `kit:"inject"`
 }
 
-type listRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
-	Limit  int     `kit:"flag,inherit" help:"max results"`
-	Client *Client `kit:"inject"`
+type randomInput struct {
+	Difficulty string  `kit:"flag" help:"difficulty (easy, medium, hard)"`
+	Client     *Client `kit:"inject"`
 }
 
 // --- handlers ---
 
-func getPage(ctx context.Context, in pageRef, emit func(*Page) error) error {
-	p, err := in.Client.GetPage(ctx, pagePath(in.Ref))
+func listQuestions(ctx context.Context, in questionsInput, emit func(*Question) error) error {
+	cats := joinCategories(in.Category)
+	diff := strings.TrimSpace(in.Difficulty)
+	qs, err := in.Client.GetQuestions(ctx, in.Limit, cats, diff)
 	if err != nil {
 		return mapErr(err)
 	}
-	return emit(p)
-}
-
-func listLinks(ctx context.Context, in listRef, emit func(*Page) error) error {
-	pages, err := in.Client.PageLinks(ctx, pagePath(in.Ref), in.Limit)
-	if err != nil {
-		return mapErr(err)
-	}
-	for _, p := range pages {
-		if err := emit(p); err != nil {
+	for _, q := range qs {
+		if err := emit(q); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// --- Resolver: the URI-native string functions, pure and network-free ---
-
-// Classify turns any accepted input — a bare path or a full triviaapi2.com URL —
-// into the canonical (type, id), so `ant resolve` and `ant url` touch no network.
-func (Domain) Classify(input string) (uriType, id string, err error) {
-	id = pagePath(input)
-	if id == "" {
-		return "", "", errs.Usage("unrecognized triviaapi2 reference: %q", input)
+func listCategories(ctx context.Context, in categoriesInput, emit func(*CategoryInfo) error) error {
+	cats, err := in.Client.GetCategories(ctx)
+	if err != nil {
+		return mapErr(err)
 	}
-	return "page", id, nil
+	for _, c := range cats {
+		if err := emit(c); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// Locate is the inverse: the live https URL for a (type, id).
-func (Domain) Locate(uriType, id string) (string, error) {
-	if uriType != "page" {
-		return "", errs.Usage("triviaapi2 has no resource type %q", uriType)
+func randomQuestion(ctx context.Context, in randomInput, emit func(*Question) error) error {
+	diff := strings.TrimSpace(in.Difficulty)
+	qs, err := in.Client.GetQuestions(ctx, 1, "", diff)
+	if err != nil {
+		return mapErr(err)
 	}
-	return BaseURL + "/" + strings.Trim(id, "/"), nil
+	if len(qs) == 0 {
+		return errs.NotFound("no question returned")
+	}
+	return emit(qs[0])
+}
+
+// --- Resolver: the URI-native string functions, pure and network-free ---
+
+// Classify is not meaningful for a pure-API service with no page-like URIs.
+// Return an error so `ant resolve` gracefully reports unsupported input.
+func (Domain) Classify(input string) (uriType, id string, err error) {
+	return "", "", errs.Usage("triviaapi2 URIs are not addressable by reference: %q", input)
+}
+
+// Locate is the inverse of Classify; not applicable for this domain.
+func (Domain) Locate(uriType, id string) (string, error) {
+	return "", errs.Usage("triviaapi2 has no resource type %q", uriType)
 }
 
 // --- helpers ---
 
-// pagePath turns any accepted input into the canonical page id: the path of a
-// full URL on this host, or a bare path with its slashes trimmed.
-func pagePath(input string) string {
-	input = strings.TrimSpace(input)
-	if u, err := url.Parse(input); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
-		return strings.Trim(u.Path, "/")
-	}
-	return strings.Trim(input, "/")
-}
-
-// mapErr converts a library error into the kit error kind that carries the right
-// exit code, so a host renders the same outcomes the standalone binary does. As
-// you add sentinel errors to the library, map them here, for example:
-//
-//	case errors.Is(err, ErrNotFound):
-//		return errs.NotFound("%s", err.Error())
-//	case errors.Is(err, ErrRateLimited):
-//		return errs.RateLimited("%s", err.Error())
 func mapErr(err error) error {
 	return err
 }
